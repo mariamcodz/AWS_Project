@@ -1,0 +1,310 @@
+from io import BytesIO, StringIO
+import json
+import awswrangler as wr
+import pandas as pd
+import boto3
+import requests
+
+
+
+print('-----------------------i was fired ----------------------')
+
+#s3 buckets processed data would be saved
+birdbucket = "a-xeno-canto-processed"
+
+#north england counties
+north_counties = ['Cheshire', 'Cumbria', 'County Durham','Manchester', 'Lancashire', 'Merseyside', 'Northumberland', 'Tyne', 'Yorkshire','Lincolnshire']
+
+s3_client = boto3.client('s3')
+
+#raw bucket name
+bucket = 'a-xeno-canto-raw-bucket' # already created on S3
+
+#website to get counties and states names in th uk
+url ='https://www.townscountiespostcodes.co.uk/counties-in-uk/'
+
+"""
+sends a get requests to the endpoint to get the html code which will be passed with pandas to extract the table. It can aslo be passed with beautifulsoup
+pandas makes table easy to extract
+"""
+x = requests.get('https://www.townscountiespostcodes.co.uk/counties-in-uk/')
+
+#extracts the first table on the page into a dataframe
+df = pd.read_html(x.text)[0]
+
+#takes the necessary column
+df = df[1:][['County','Country']]
+
+#convert it to a dictionary, so we have the city name as a key and the counties under it as array
+states = {k: g["County"].tolist() for k,g in df.groupby("Country")}
+
+
+#time of year
+#03-> Maarch, 04->April, 05-> May and these are spring months
+Spring= ['03', '04' ,'05']
+Summer =['06', '07', '08']
+Autumn = ['09', '10' , '11']
+Winter = ['12', '01', '02']
+
+def is_it_north(address):
+    """
+    checks an address and check if any of the word match the counties categorized as north counties
+    """
+    splitted_address = address.split(',')
+    temp = []
+    for j in splitted_address:
+        if j.strip() in north_counties:
+            temp.append('yes')
+            break
+    if len(temp) <1:
+        return 'NO'
+    
+    return 'YES'
+    
+#converts a string number to an integer
+def reclean(hour):
+    """
+    This function was created as some numbers like 005 were passing through the filter
+    This converts numbers like that to int and that removes the 00
+    """
+    try:
+        correct_hour = int(hour)
+    except:
+        correct_hour = 5
+    return str(correct_hour)
+    
+#get the hour form the time columns
+#this column has different case, each of them was factored in 
+#some had ??, date, 8am,8:00am etc
+def clean_hour(hour):
+    if hour.startswith('00') and len(hour)<4:
+        real_hour = hour[-2:]
+    elif '.' in hour or ':' in hour:
+        hr = hour.split('.')[0].split(':')[0]
+        if len(hr) <2:
+            real_hour = '0'+hr
+        else:
+            real_hour = hr
+    elif 'am' in hour and '.' not in hour:
+        hr = hour.split('am')[0]
+        if len(hr) <2:
+            real_hour = '0'+hr
+        else:
+            real_hour = hr
+    elif 'pm' in hour and '.' not in hour:
+        try:
+            hr = hour.split('pm')[0]
+            if len(hr) <2:
+                real_hour = '0'+hr
+            else:
+                real_hour = hr
+        except:
+            real_hour = '19'
+    elif '-' in hour:
+        real_hour = hour.split('-')[0]
+    elif 'noon' in hour:
+        real_hour = '15'
+    elif '?' in hour:
+        real_hour = '05'
+    else:
+        real_hour = '05'
+    send_hour = reclean(real_hour)
+    
+    return send_hour
+    
+#checks if england is the address colummn
+def england_or_not(address):
+    if 'england' in address.lower():
+        answer = 'England'
+    else:
+        answer ='Not England'
+    return answer
+    
+#check which season it was using the month in the date
+def check_season(daytime):
+    month = daytime.split('-')[1]
+    
+    if month in Spring:
+        season='spring'
+    elif month in Summer:
+        season= 'summer'
+    elif month in Autumn:
+        season='autumn'
+    elif month in Winter:
+        season='winter'
+    else:
+        season='No season'
+    return season
+
+
+#10-4am night, 4-12 morning,12-5 afternoon, 6-10 evening
+def time_of_day(daytime):
+    hour = daytime.split(':')
+    
+    try:
+        if int(hour[0]) < 13 and int(hour[0])  > 3:
+            answer = 'Morning'
+        elif int(hour[0]) > 13 and int(hour[0])  < 18:
+            answer = 'Noon'
+        elif int(hour[0]) > 17 and int(hour[0])  < 22:
+            answer = 'Evening'
+        else:
+            answer = 'Night'
+    except:
+        answer = 'NO TIME'
+    return answer
+
+
+#retired this function
+# def hour(daytime):
+#     hour = daytime.split(':')
+#     return hour[0]
+
+#gets the year from the date
+def get_upload_year(daytime):
+    year = daytime.split('-')[0]
+    return year
+
+
+#dtermine the gender by searching for male, female in the column
+def gender(desc):
+    desc = desc.lower()
+    if 'female' in desc:
+        bird_gender = 'female'
+    elif 'male' in desc and 'female' not in desc:
+        bird_gender= 'male'
+    else:
+        bird_gender= 'No gender specified'
+    return bird_gender
+print("go ")
+
+#check if the desc contains the word song or call
+def is_call_or_song(desc):
+    desc = desc.lower()
+    if 'song' in desc and 'call' not in desc:
+        sound = 'song'
+    elif 'call' in desc and 'song' not in desc:
+        sound = 'call'
+    elif 'call' in desc and 'song' in desc:
+        sound = 'both'
+    else:
+        sound = 'Not specified'
+    return sound
+
+
+#gets the county name
+def check_county(addr):
+    """
+    loop through the list of states in the uk
+    loop through each county under them
+    check if the county is in the address
+    it returns the county name if found and return a default if it does find any
+    """
+    for i in states:
+        for j in states[i]:
+            if j in addr:
+                return j
+            
+    return 'No County'
+    
+#gets the country
+def check_country(addr):
+    
+    for i in states:
+
+        if i in addr:
+            return i
+
+    return 'No Country'
+def lambda_handler(event, context):
+    # TODO implement
+    
+    try:
+        #gets the bucket name that triggered this function
+        bucket_name = event["Records"][0]["s3"]["bucket"]["name"]
+        
+        #gets the file name that was newly created
+        s3_file_name = event["Records"][0]["s3"]["object"]["key"]
+        #get the object 
+        resp = s3_client.get_object(Bucket=bucket_name, Key=s3_file_name)
+        
+        #read it in 
+        f = resp['Body'].read()
+        #converts it to a dataframe
+        df = pd.json_normalize(json.loads(f)['records'])
+        df = df.dropna()
+        #replace the columns names
+        df.columns = ['xeno_canto_catalogue_number','specie_generic_name','specific_name','subspecie_name','specie_eng_name','recordist_name','recording_made_in','locality_name','lat','lng','alt','rec_sound_type','url','audio_file_url','file_original_name','license_desc_url','rec_quality_rating','len_in_mins','rec_time','rec_date','upload_date','bg_specie','add_remarks','identified_visually','lure_with_playback','sono_small','sono_medium','sono_large','sono_full']
+        
+        
+        #extarct rows with england in the locality name
+        contains_england = df # df[df['locality_name'].str.contains('England')]
+        
+        #contains_england['country'] = contains_england['locality_name'].apply(england_or_not)
+        contains_england['county'] = contains_england['locality_name'].apply(check_county)
+        contains_england['country'] = contains_england['locality_name'].apply(check_country)
+        
+        contains_england['time_of_day'] = contains_england['rec_time'].apply(time_of_day)
+
+        contains_england['specie_generic_name'] = contains_england['specie_generic_name'].str.title()
+        contains_england['specific_name'] = contains_england['specific_name'].str.title()
+        contains_england['specie_eng_name'] = contains_england['specie_eng_name'].str.title()
+        contains_england['recordist_name'] = contains_england['recordist_name'].str.title()
+        contains_england['locality_name'] = contains_england['locality_name'].str.title()
+        contains_england['rec_sound_type'] = contains_england['rec_sound_type'].str.title()
+        contains_england['add_remarks'] = contains_england['add_remarks'].str.title()
+
+        
+        #north or south england
+        #creates a new column with yes or no function
+        contains_england['is_north'] = contains_england['locality_name'].apply(is_it_north)
+
+        #male or female or no gender specified
+        contains_england['gender'] = contains_england['rec_sound_type'].apply(gender)
+        
+        
+        #contains_england['recording_hour'] =  contains_england['rec_time'].apply(hour)
+        
+        contains_england['recording_hour'] =  contains_england['rec_time'].apply(clean_hour)
+        contains_england['season'] = contains_england['rec_date'].apply(check_season)
+        
+        
+        #convert to datetime and ignore errors
+        contains_england['rec_date'] = pd.to_datetime(contains_england['rec_date'],errors='coerce')
+        contains_england['rec_day'] = contains_england['rec_date'].dt.day.astype('Int64')
+        contains_england['rec_month'] = contains_england['rec_date'].dt.month.astype('Int64')
+        contains_england['rec_year'] = contains_england['rec_date'].dt.year.astype('Int64')
+        
+        
+        
+        contains_england['upload_date'] = pd.to_datetime(contains_england['upload_date'],errors='coerce')
+        contains_england['upload_day'] = contains_england['upload_date'].dt.day.astype('Int64')
+        contains_england['upload_month'] = contains_england['upload_date'].dt.month.astype('Int64')
+        contains_england['upload_year'] = contains_england['upload_date'].dt.year.astype('Int64')
+        
+        contains_england['days_diff']=(contains_england['upload_date'] - contains_england['rec_date']).dt.days
+        contains_england['call_song'] = contains_england['rec_sound_type'].apply(is_call_or_song)
+        
+        print('----------------------droping rec date and upload datet----------------------')
+        contains_england.drop('rec_date',axis=1,inplace=True)
+        
+        contains_england.drop('upload_date',axis=1,inplace=True)
+
+        print('----------------------selecting non empty rows----------------------')
+        ce = contains_england[~(contains_england['lat'].isna())]
+        ce = ce[(ce['lat'] !='')]
+        export = ce[~ce['rec_day'].isna()]
+        print('----------------------converting lat and long to float----------------------')
+        export['lat'] = export['lat'].astype(float)
+        export['lng'] = export['lng'].astype(float)
+        
+        print('----------saving to s3--------------------')
+        wr.s3.to_parquet(export, path='s3://a-xeno-canto-processed/my_file.parquet', dataset=True, database="mybirdproject", table="present")
+        #wr.s3.to_csv(export, birdbucket, database="birdFinale", table="bird_live")
+
+    except Exception as err:
+        print(err)
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from Lambda!')
+    }
