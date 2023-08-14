@@ -1,0 +1,40 @@
+import json
+import requests
+import pandas as pd
+from io import StringIO # python3; python2: BytesIO 
+import boto3
+import time
+
+#raw bucket name
+bucket = 'a-xeno-canto-raw-bucket' # already created on S3
+
+def req():
+    country = "united_kingdom"
+    page = 1
+    numPages = 2
+    recordings = []
+    while page <=numPages :
+        
+        #gives me an idea of how many api calls were made
+        if numPages%100==0:
+            print(numPages)
+        url = f"https://xeno-canto.org/api/2/recordings?query=cnt:{country}&page={page}"
+        response = requests.get(url)
+        numPages = int(response.json()["numPages"])
+        recordings.extend(response.json()['recordings'])
+        page+=1
+
+        #print(page)
+    
+    jsonString = json.dumps({"records":recordings})
+    csv_buffer = StringIO(jsonString)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket, 'bird.json').put(Body=csv_buffer.getvalue())
+
+def lambda_handler(event, context):
+    req()
+    # TODO implement
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from Lambda!')
+    }
